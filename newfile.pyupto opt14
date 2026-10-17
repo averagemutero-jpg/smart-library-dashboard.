@@ -1,0 +1,834 @@
+
+import sqlite3
+import re
+from datetime import date, timedelta
+
+DB_NAME = "library_system.db"
+
+
+# ================ DATABASE ================
+
+def connect_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def setup_database():
+    conn = connect_db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            barcode TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            author TEXT,
+            subject TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS book_details (
+            barcode TEXT PRIMARY KEY,
+            genre TEXT,
+            description TEXT,
+            reading_level TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS readers (
+            reader_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            interests TEXT,
+            reading_level TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ratings (
+            reader_id TEXT,
+            barcode TEXT,
+            rating INTEGER,
+            PRIMARY KEY (reader_id, barcode)
+        )
+    """)
+
+    # New table for borrowing and returning
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS loans (
+            loan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reader_id TEXT NOT NULL,
+            barcode TEXT NOT NULL,
+            borrow_date TEXT NOT NULL,
+            due_date TEXT NOT NULL,
+            return_date TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# ================ ID GENERATION ================
+
+def next_book_id():
+    conn = connect_db()
+    rows = conn.execute("SELECT barcode FROM books").fetchall()
+    conn.close()
+
+    highest = 0
+
+    for row in rows:
+        match = re.fullmatch(r"LIB(\d+)", row["barcode"])
+        if match:
+            highest = max(highest, int(match.group(1)))
+
+    return "LIB" + str(highest + 1).zfill(4)
+
+
+def next_reader_id():
+    conn = connect_db()
+    rows = conn.execute(
+        "SELECT reader_id FROM readers"
+    ).fetchall()
+    conn.close()
+
+    highest = 0
+
+    for row in rows:
+        match = re.fullmatch(r"R(\d+)", row["reader_id"])
+        if match:
+            highest = max(highest, int(match.group(1)))
+
+    return "R" + str(highest + 1).zfill(4)
+
+
+# ================ BARCODE IMAGE ================
+
+def generate_barcode(number):
+    try:
+        import barcode
+        from barcode.writer import ImageWriter
+
+        code = barcode.get(
+            "code128", number, writer=ImageWriter()
+        )
+        filename = code.save(number)
+
+        print("Barcode image created:", filename + ".png")
+
+    except ImportError:
+        print("Install python-barcode and Pillow in Pydroid 3.")
+
+    except Exception as error:
+        print("Barcode image error:", error)
+
+
+# ================ REGISTER BOOK ================
+
+def register_book():
+    print("\nREGISTER A BOOK")
+
+    title = input("Book title: ").strip()
+    author = input("Author: ").strip()
+    subject = input("Subject: ").strip()
+    genre = input("Genre: ").strip()
+    description = input("Book description: ").strip()
+    level = input(
+        "Reading level (beginner/intermediate/advanced): "
+    ).strip()
+
+    if not title:
+        print("Book title cannot be empty.")
+        return
+
+    number = next_book_id()
+    conn = connect_db()
+
+    try:
+        conn.execute("""
+            INSERT INTO books (barcode, title, author, subject)
+            VALUES (?, ?, ?, ?)
+        """, (number, title, author, subject))
+
+        conn.execute("""
+            INSERT OR REPLACE INTO book_details
+            (barcode, genre, description, reading_level)
+            VALUES (?, ?, ?, ?)
+        """, (number, genre, description, level))
+
+        conn.commit()
+
+    except sqlite3.Error as error:
+        conn.rollback()
+        print("Registration error:", error)
+        conn.close()
+        return
+
+    conn.close()
+
+    print("\nBook registered successfully.")
+    print("Barcode:", number)
+    generate_barcode(number)
+
+
+# ================ VIEW ALL BOOKS ================
+
+def view_all_books():
+    conn = connect_db()
+
+    books = conn.execute("""
+        SELECT b.*, d.genre, d.description, d.reading_level
+        FROM books b
+        LEFT JOIN book_details d ON b.barcode = d.barcode
+        ORDER BY b.title
+    """).fetchall()
+
+    conn.close()
+
+    if not books:
+        print("No books registered.")
+        return
+
+    print("\nALL REGISTERED BOOKS")
+
+    for book in books:
+        print("\nBarcode:", book["barcode"])
+        print("Title:", book["title"])
+        print("Author:", book["author"] or "")
+        print("Subject:", book["subject"] or "")
+        print("Genre:", book["genre"] or "")
+        print("Description:", book["description"] or "")
+        print("Reading level:", book["reading_level"] or "")
+
+
+# ================ SEARCH BOOK ================
+
+def find_book(number):
+    conn = connect_db()
+
+    book = conn.execute("""
+        SELECT b.*, d.genre, d.description, d.reading_level
+        FROM books b
+        LEFT JOIN book_details d ON b.barcode = d.barcode
+        WHERE b.barcode = ?
+    """, (number,)).fetchone()
+
+    conn.close()
+
+    if not book:
+        print("Book not found.")
+        return False
+
+    print("\nBOOK DETAILS")
+    print("Barcode:", book["barcode"])
+    print("Title:", book["title"])
+    print("Author:", book["author"] or "")
+    print("Subject:", book["subject"] or "")
+    print("Genre:", book["genre"] or "")
+    print("Description:", book["description"] or "")
+    print("Reading level:", book["reading_level"] or "")
+
+    return True
+
+
+def search_book():
+    term = input(
+        "Enter barcode, title, author or subject: "
+    ).strip()
+
+    if not term:
+        print("Enter a search term.")
+        return
+
+    conn = connect_db()
+    pattern = "%" + term + "%"
+
+    results = conn.execute("""
+        SELECT barcode, title, author, subject
+        FROM books
+        WHERE barcode LIKE ?
+           OR title LIKE ?
+           OR author LIKE ?
+           OR subject LIKE ?
+        ORDER BY title
+    """, (pattern, pattern, pattern, pattern)).fetchall()
+
+    conn.close()
+
+    if not results:
+        print("No matching books found.")
+        return
+
+    for book in results:
+        print("\nBarcode:", book["barcode"])
+        print("Title:", book["title"])
+        print("Author:", book["author"] or "")
+        print("Subject:", book["subject"] or "")
+
+
+def scan_lookup():
+    print("Scan a barcode with your phone scanner.")
+    number = input("Enter or paste the barcode number: ").strip()
+    find_book(number)
+
+
+# ================ EDIT BOOK ================
+
+def edit_book():
+    number = input("Barcode of book to edit: ").strip()
+    conn = connect_db()
+
+    book = conn.execute(
+        "SELECT * FROM books WHERE barcode = ?", (number,)
+    ).fetchone()
+
+    if not book:
+        conn.close()
+        print("Book not found.")
+        return
+
+    details = conn.execute(
+        "SELECT * FROM book_details WHERE barcode = ?", (number,)
+    ).fetchone()
+
+    def ask(label, old_value):
+        answer = input(
+            label + " [" + str(old_value or "") + "]: "
+        ).strip()
+        return answer if answer else (old_value or "")
+
+    title = ask("Title", book["title"])
+    author = ask("Author", book["author"])
+    subject = ask("Subject", book["subject"])
+    genre = ask("Genre", details["genre"] if details else "")
+    description = ask(
+        "Description", details["description"] if details else ""
+    )
+    level = ask(
+        "Reading level", details["reading_level"] if details else ""
+    )
+
+    conn.execute("""
+        UPDATE books
+        SET title = ?, author = ?, subject = ?
+        WHERE barcode = ?
+    """, (title, author, subject, number))
+
+    conn.execute("""
+        INSERT OR REPLACE INTO book_details
+        (barcode, genre, description, reading_level)
+        VALUES (?, ?, ?, ?)
+    """, (number, genre, description, level))
+
+    conn.commit()
+    conn.close()
+    print("Book details updated.")
+
+
+# ================ DELETE BOOK ================
+
+def delete_book():
+    number = input("Barcode of book to delete: ").strip()
+    conn = connect_db()
+
+    book = conn.execute(
+        "SELECT title FROM books WHERE barcode = ?", (number,)
+    ).fetchone()
+
+    if not book:
+        conn.close()
+        print("Book not found.")
+        return
+
+    active = conn.execute("""
+        SELECT loan_id FROM loans
+        WHERE barcode = ? AND return_date IS NULL
+    """, (number,)).fetchone()
+
+    if active:
+        conn.close()
+        print("This book is on loan. Return it before deleting it.")
+        return
+
+    confirm = input(
+        "Delete " + book["title"] + "? Type YES to confirm: "
+    ).strip()
+
+    if confirm != "YES":
+        conn.close()
+        print("Deletion cancelled.")
+        return
+
+    conn.execute("DELETE FROM ratings WHERE barcode = ?", (number,))
+    conn.execute("DELETE FROM book_details WHERE barcode = ?", (number,))
+    conn.execute("DELETE FROM loans WHERE barcode = ?", (number,))
+    conn.execute("DELETE FROM books WHERE barcode = ?", (number,))
+
+    conn.commit()
+    conn.close()
+    print("Book deleted.")
+
+
+# ================ REGISTER READER ================
+
+def register_reader():
+    name = input("Reader's name: ").strip()
+    interests = input("Reader's interests: ").strip()
+    level = input(
+        "Reading level (beginner/intermediate/advanced): "
+    ).strip()
+
+    if not name:
+        print("Reader's name cannot be empty.")
+        return
+
+    conn = connect_db()
+
+    existing = conn.execute("""
+        SELECT reader_id FROM readers
+        WHERE LOWER(name) = LOWER(?)
+    """, (name,)).fetchone()
+
+    if existing:
+        reader_id = existing["reader_id"]
+
+        conn.execute("""
+            UPDATE readers
+            SET interests = ?, reading_level = ?
+            WHERE reader_id = ?
+        """, (interests, level, reader_id))
+
+        print("Reader profile updated.")
+    else:
+        reader_id = next_reader_id()
+
+        conn.execute("""
+            INSERT INTO readers
+            (reader_id, name, interests, reading_level)
+            VALUES (?, ?, ?, ?)
+        """, (reader_id, name, interests, level))
+
+        print("Reader registered.")
+
+    conn.commit()
+    conn.close()
+    print("Reader ID:", reader_id)
+
+
+# ================ RATE A BOOK ================
+
+def rate_book():
+    reader_id = input("Reader ID: ").strip()
+    number = input("Book barcode: ").strip()
+
+    try:
+        rating = int(input("Rating from 1 to 5: "))
+    except ValueError:
+        print("Enter a whole number from 1 to 5.")
+        return
+
+    if not 1 <= rating <= 5:
+        print("Rating must be between 1 and 5.")
+        return
+
+    conn = connect_db()
+
+    reader = conn.execute(
+        "SELECT reader_id FROM readers WHERE reader_id = ?",
+        (reader_id,)
+    ).fetchone()
+
+    book = conn.execute(
+        "SELECT barcode FROM books WHERE barcode = ?", (number,)
+    ).fetchone()
+
+    if not reader or not book:
+        conn.close()
+        print("Reader or book not found.")
+        return
+
+    conn.execute("""
+        INSERT OR REPLACE INTO ratings (reader_id, barcode, rating)
+        VALUES (?, ?, ?)
+    """, (reader_id, number, rating))
+
+    conn.commit()
+    conn.close()
+    print("Rating saved.")
+
+
+# ================ AI RECOMMENDATIONS ================
+
+def smart_recommend():
+    from groq import Groq
+
+    reader_id = input("Reader ID: ").strip()
+    conn = connect_db()
+
+    reader = conn.execute(
+        "SELECT * FROM readers WHERE reader_id = ?", (reader_id,)
+    ).fetchone()
+
+    if not reader:
+        conn.close()
+        print("Reader not found. Register the reader first.")
+        return
+
+    books = conn.execute("""
+        SELECT b.barcode, b.title, b.author, b.subject,
+               d.genre, d.description, d.reading_level
+        FROM books b
+        LEFT JOIN book_details d ON b.barcode = d.barcode
+        ORDER BY b.title
+    """).fetchall()
+
+    ratings = conn.execute("""
+        SELECT b.title, r.rating, d.genre
+        FROM ratings r
+        JOIN books b ON b.barcode = r.barcode
+        LEFT JOIN book_details d ON d.barcode = b.barcode
+        WHERE r.reader_id = ?
+    """, (reader_id,)).fetchall()
+
+    conn.close()
+
+    if not books:
+        print("No books are registered.")
+        return
+
+    goal = input("What would you like to learn? ").strip()
+    api_key = input("Enter your Groq API key: ").strip()
+
+    if not api_key:
+        print("No API key entered.")
+        return
+
+    catalogue = []
+
+    for b in books:
+        catalogue.append(
+            "Barcode: " + b["barcode"] +
+            "\nTitle: " + b["title"] +
+            "\nAuthor: " + str(b["author"] or "") +
+            "\nSubject: " + str(b["subject"] or "") +
+            "\nGenre: " + str(b["genre"] or "") +
+            "\nDescription: " + str(b["description"] or "") +
+            "\nReading level: " + str(b["reading_level"] or "")
+        )
+
+    rating_text = "\n".join(
+        r["title"] + ": " + str(r["rating"]) + "/5"
+        for r in ratings
+    ) or "No previous ratings."
+
+    prompt = (
+        "Reader interests: " + str(reader["interests"] or "") +
+        "\nReading level: " + str(reader["reading_level"] or "") +
+        "\nLearning goal: " + goal +
+        "\nPrevious ratings:\n" + rating_text +
+        "\n\nAvailable library books:\n" + "\n\n".join(catalogue) +
+        "\n\nRecommend up to three books from this catalogue only. "
+        "Use exact titles and barcodes. Never invent books or codes. "
+        "Explain why each recommendation suits the reader. "
+        "If none is suitable, say so."
+    )
+
+    try:
+        client = Groq(api_key=api_key, timeout=60)
+
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an intelligent library assistant. "
+                        "Recommend only books in the supplied catalogue. "
+                        "Never invent titles or barcodes."
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ],
+            max_completion_tokens=500
+        )
+
+        print("\nAI BOOK RECOMMENDATIONS")
+        print(response.choices[0].message.content)
+
+    except Exception as error:
+        print("AI recommendation error:", error)
+
+
+# ================ BORROW A BOOK ================
+
+def borrow_book():
+    print("\nBORROW A BOOK")
+
+    reader_id = input("Reader ID: ").strip()
+    number = input("Book barcode (or scanned barcode): ").strip()
+
+    conn = connect_db()
+
+    reader = conn.execute(
+        "SELECT * FROM readers WHERE reader_id = ?", (reader_id,)
+    ).fetchone()
+
+    book = conn.execute(
+        "SELECT * FROM books WHERE barcode = ?", (number,)
+    ).fetchone()
+
+    if not reader:
+        conn.close()
+        print("Reader not found. Register the reader first.")
+        return
+
+    if not book:
+        conn.close()
+        print("Book barcode not found.")
+        return
+
+    active = conn.execute("""
+        SELECT loan_id FROM loans
+        WHERE barcode = ? AND return_date IS NULL
+    """, (number,)).fetchone()
+
+    if active:
+        conn.close()
+        print("This book is already borrowed and has not been returned.")
+        return
+
+    days_text = input(
+        "Loan period in days (press Enter for 14): "
+    ).strip()
+
+    if days_text == "":
+        days = 14
+    else:
+        try:
+            days = int(days_text)
+        except ValueError:
+            conn.close()
+            print("Enter a whole number of days.")
+            return
+
+    if days < 1 or days > 365:
+        conn.close()
+        print("Loan period must be between 1 and 365 days.")
+        return
+
+    borrow_date = date.today()
+    due_date = borrow_date + timedelta(days=days)
+
+    conn.execute("""
+        INSERT INTO loans
+        (reader_id, barcode, borrow_date, due_date, return_date)
+        VALUES (?, ?, ?, ?, NULL)
+    """, (
+        reader_id,
+        number,
+        borrow_date.isoformat(),
+        due_date.isoformat()
+    ))
+
+    conn.commit()
+    conn.close()
+
+    print("\nBOOK BORROWED SUCCESSFULLY")
+    print("Reader:", reader["name"])
+    print("Book:", book["title"])
+    print("Barcode:", number)
+    print("Borrowing date:", borrow_date.isoformat())
+    print("Due date:", due_date.isoformat())
+
+
+# ================ RETURN A BOOK ================
+
+def return_book():
+    print("\nRETURN A BOOK")
+
+    number = input("Book barcode (or scanned barcode): ").strip()
+    conn = connect_db()
+
+    loan = conn.execute("""
+        SELECT loans.*, books.title, readers.name
+        FROM loans
+        JOIN books ON books.barcode = loans.barcode
+        JOIN readers ON readers.reader_id = loans.reader_id
+        WHERE loans.barcode = ? AND loans.return_date IS NULL
+        ORDER BY loans.loan_id DESC
+        LIMIT 1
+    """, (number,)).fetchone()
+
+    if not loan:
+        conn.close()
+        print("No active loan found for this barcode.")
+        return
+
+    today = date.today()
+    due = date.fromisoformat(loan["due_date"])
+
+    conn.execute("""
+        UPDATE loans
+        SET return_date = ?
+        WHERE loan_id = ?
+    """, (today.isoformat(), loan["loan_id"]))
+
+    conn.commit()
+    conn.close()
+
+    print("\nBOOK RETURNED SUCCESSFULLY")
+    print("Book:", loan["title"])
+    print("Barcode:", number)
+    print("Borrowed by:", loan["name"])
+    print("Due date:", loan["due_date"])
+    print("Return date:", today.isoformat())
+
+    if today > due:
+        print("Status: RETURNED LATE")
+        print("Days overdue:", (today - due).days)
+    else:
+        print("Status: RETURNED ON TIME")
+
+
+# ================ VIEW BORROWED BOOKS ================
+
+def view_borrowed_books():
+    conn = connect_db()
+
+    loans = conn.execute("""
+        SELECT loans.*, books.title, readers.name
+        FROM loans
+        JOIN books ON books.barcode = loans.barcode
+        JOIN readers ON readers.reader_id = loans.reader_id
+        WHERE loans.return_date IS NULL
+        ORDER BY loans.due_date
+    """).fetchall()
+
+    conn.close()
+
+    print("\nCURRENTLY BORROWED BOOKS")
+
+    if not loans:
+        print("There are no active loans.")
+        return
+
+    today = date.today()
+
+    for loan in loans:
+        due = date.fromisoformat(loan["due_date"])
+
+        print("\nLoan ID:", loan["loan_id"])
+        print("Book:", loan["title"])
+        print("Barcode:", loan["barcode"])
+        print("Reader:", loan["name"])
+        print("Reader ID:", loan["reader_id"])
+        print("Borrowed:", loan["borrow_date"])
+        print("Due:", loan["due_date"])
+
+        if today > due:
+            print("Status: OVERDUE by", (today - due).days, "day(s)")
+        else:
+            print("Status: ON LOAN")
+
+
+# ================ VIEW OVERDUE BOOKS ================
+
+def view_overdue_books():
+    conn = connect_db()
+
+    loans = conn.execute("""
+        SELECT loans.*, books.title, readers.name
+        FROM loans
+        JOIN books ON books.barcode = loans.barcode
+        JOIN readers ON readers.reader_id = loans.reader_id
+        WHERE loans.return_date IS NULL
+          AND loans.due_date < ?
+        ORDER BY loans.due_date
+    """, (date.today().isoformat(),)).fetchall()
+
+    conn.close()
+
+    print("\nOVERDUE BOOKS")
+
+    if not loans:
+        print("No overdue books. Great!")
+        return
+
+    today = date.today()
+
+    for loan in loans:
+        due = date.fromisoformat(loan["due_date"])
+
+        print("\nBook:", loan["title"])
+        print("Barcode:", loan["barcode"])
+        print("Reader:", loan["name"])
+        print("Reader ID:", loan["reader_id"])
+        print("Borrowed:", loan["borrow_date"])
+        print("Due date:", loan["due_date"])
+        print("Days overdue:", (today - due).days)
+
+
+# ================ MAIN MENU ================
+
+def main():
+    setup_database()
+
+    while True:
+        print("\n===================================")
+        print("  SMART LIBRARY MANAGEMENT SYSTEM")
+        print("===================================")
+        print("1. Register book")
+        print("2. View all books")
+        print("3. Edit book details")
+        print("4. Delete book")
+        print("5. Search book")
+        print("6. AI personalized recommendations")
+        print("7. Exit")
+        print("8. Look up a scanned barcode")
+        print("9. Register or update reader")
+        print("10. Rate a book")
+        print("11. Borrow a book")
+        print("12. Return a book")
+        print("13. View borrowed books")
+        print("14. View overdue books")
+        print("===================================")
+
+        choice = input("Choose an option: ").strip()
+
+        if choice == "1":
+            register_book()
+        elif choice == "2":
+            view_all_books()
+        elif choice == "3":
+            edit_book()
+        elif choice == "4":
+            delete_book()
+        elif choice == "5":
+            search_book()
+        elif choice == "6":
+            smart_recommend()
+        elif choice == "7":
+            print("Thank you for using the library system.")
+            break
+        elif choice == "8":
+            scan_lookup()
+        elif choice == "9":
+            register_reader()
+        elif choice == "10":
+            rate_book()
+        elif choice == "11":
+            borrow_book()
+        elif choice == "12":
+            return_book()
+        elif choice == "13":
+            view_borrowed_books()
+        elif choice == "14":
+            view_overdue_books()
+        else:
+            print("Invalid choice. Enter a number from 1 to 14.")
+
+
+if __name__ == "__main__":
+    main()
